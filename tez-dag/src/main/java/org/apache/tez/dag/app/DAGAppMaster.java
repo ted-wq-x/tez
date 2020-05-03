@@ -18,7 +18,7 @@
 
 package org.apache.tez.dag.app;
 
-import static com.google.common.base.Preconditions.checkNotNull;
+
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -55,6 +55,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.Objects;
 
 import com.google.common.collect.BiMap;
 import com.google.common.collect.HashBiMap;
@@ -191,7 +192,7 @@ import org.slf4j.LoggerFactory;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
 import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 import com.google.common.collect.Maps;
 import com.google.common.util.concurrent.ListeningExecutorService;
 import com.google.common.util.concurrent.MoreExecutors;
@@ -373,7 +374,7 @@ public class DAGAppMaster extends AbstractService {
 
     LOG.info("Created DAGAppMaster for application " + applicationAttemptId
         + ", versionInfo=" + dagVersionInfo.toString());
-
+    TezCommonUtils.logCredentials(LOG, this.appMasterUgi.getCredentials(), "am");
   }
 
   // Pull this WebAppUtils function into Tez until YARN-4186
@@ -1019,7 +1020,7 @@ public class DAGAppMaster extends AbstractService {
 
     // TODO Does this move to the client in case of work-preserving recovery.
     TokenCache.setSessionToken(sessionToken, dagCredentials);
-
+    TezCommonUtils.logCredentials(LOG, dagCredentials, "newDag");
     // create single dag
     DAGImpl newDag =
         new DAGImpl(dagId, amConf, dagPB, dispatcher.getEventHandler(),
@@ -1037,28 +1038,32 @@ public class DAGAppMaster extends AbstractService {
       LOG.warn("Failed to generate json for DAG", e);
     }
 
-    Utils.generateDAGVizFile(newDag, dagPB, logDirs, newDag.getDAGScheduler());
-    writePBTextFile(newDag);
+    writeDebugArtifacts(dagPB, newDag);
     return newDag;
   } // end createDag()
 
+  private void writeDebugArtifacts(DAGPlan dagPB, DAGImpl newDag) {
+    boolean debugArtifacts =
+        newDag.getConf().getBoolean(TezConfiguration.TEZ_GENERATE_DEBUG_ARTIFACTS,
+            TezConfiguration.TEZ_GENERATE_DEBUG_ARTIFACTS_DEFAULT);
+    if (debugArtifacts) {
+      Utils.generateDAGVizFile(newDag, dagPB, logDirs, newDag.getDAGScheduler());
+      writePBTextFile(newDag);
+    }
+  }
 
   private void writePBTextFile(DAG dag) {
-    if (dag.getConf().getBoolean(TezConfiguration.TEZ_GENERATE_DEBUG_ARTIFACTS,
-        TezConfiguration.TEZ_GENERATE_DEBUG_ARTIFACTS_DEFAULT)) {
+    String logFile = logDirs[new Random().nextInt(logDirs.length)] + File.separatorChar
+        + dag.getID().toString() + "-" + TezConstants.TEZ_PB_PLAN_TEXT_NAME;
 
-      String logFile = logDirs[new Random().nextInt(logDirs.length)] + File.separatorChar +
-          dag.getID().toString()  + "-" + TezConstants.TEZ_PB_PLAN_TEXT_NAME;
-
-      LOG.info("Writing DAG plan to: " + logFile);
-      File outFile = new File(logFile);
-      try {
-        PrintWriter printWriter = new PrintWriter(outFile, "UTF-8");
-        printWriter.println(TezUtilsInternal.convertDagPlanToString(dag.getJobPlan()));
-        printWriter.close();
-      } catch (IOException e) {
-        LOG.warn("Failed to write TEZ_PLAN to " + outFile.toString(), e);
-      }
+    LOG.info("Writing DAG plan to: " + logFile);
+    File outFile = new File(logFile);
+    try {
+      PrintWriter printWriter = new PrintWriter(outFile, "UTF-8");
+      printWriter.println(TezUtilsInternal.convertDagPlanToString(dag.getJobPlan()));
+      printWriter.close();
+    } catch (IOException e) {
+      LOG.warn("Failed to write TEZ_PLAN to " + outFile.toString(), e);
     }
   }
 
@@ -1458,7 +1463,7 @@ public class DAGAppMaster extends AbstractService {
     private volatile String queueName;
 
     public RunningAppContext(Configuration config) {
-      checkNotNull(config, "config is null");
+      Objects.requireNonNull(config, "config is null");
       this.conf = config;
       this.eventHandler = dispatcher.getEventHandler();
     }
@@ -1684,7 +1689,7 @@ public class DAGAppMaster extends AbstractService {
 
     @Override
     public void setDAG(DAG dag) {
-      Preconditions.checkNotNull(dag, "dag is null");
+      Objects.requireNonNull(dag, "dag is null");
       try {
         wLock.lock();
         this.dag = dag;

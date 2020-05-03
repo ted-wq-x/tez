@@ -52,6 +52,7 @@ import org.apache.hadoop.io.DataInputBuffer;
 import org.apache.hadoop.io.IOUtils;
 import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.tez.common.CallableWithNdc;
+import org.apache.tez.common.GuavaShim;
 import org.apache.tez.common.TezCommonUtils;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.TaskCounter;
@@ -77,7 +78,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -542,7 +543,7 @@ public class UnorderedPartitionedKVWriter extends BaseUnorderedPartitionedKVWrit
           new ArrayList<WrappedBuffer>(filledBuffers), codec, spilledRecordsCounter,
           spillNumber));
       filledBuffers.clear();
-      Futures.addCallback(future, new SpillCallback(spillNumber));
+      Futures.addCallback(future, new SpillCallback(spillNumber), GuavaShim.directExecutor());
       // Update once per buffer (instead of every record)
       updateTezCountersAndNotify();
       return true;
@@ -812,7 +813,7 @@ public class UnorderedPartitionedKVWriter extends BaseUnorderedPartitionedKVWrit
             TezSpillRecord sr = new TezSpillRecord(1);
             sr.putIndex(rec, 0);
             finalIndexPath = outputFileHandler.getOutputIndexFileForWrite(indexFileSizeEstimate);
-            sr.writeToFile(finalIndexPath, conf);
+            sr.writeToFile(finalIndexPath, conf, localFs);
           }
           eventList.add(generateDMEvent(false, -1, false, outputContext
                   .getUniqueIdentifier(), emptyPartitions));
@@ -1139,7 +1140,7 @@ public class UnorderedPartitionedKVWriter extends BaseUnorderedPartitionedKVWrit
       }
       deleteIntermediateSpills();
     }
-    finalSpillRecord.writeToFile(finalIndexPath, conf);
+    finalSpillRecord.writeToFile(finalIndexPath, conf, localFs);
     fileOutputBytesCounter.increment(indexFileSizeEstimate);
     LOG.info(destNameTrimmed + ": " + "Finished final spill after merging : " + numSpills.get() + " spills");
   }
@@ -1232,7 +1233,7 @@ public class UnorderedPartitionedKVWriter extends BaseUnorderedPartitionedKVWrit
       throws IOException {
     if (spillPathDetails.indexFilePath != null) {
       //write the index record
-      spillRecord.writeToFile(spillPathDetails.indexFilePath, conf);
+      spillRecord.writeToFile(spillPathDetails.indexFilePath, conf, localFs);
     } else {
       //add to cache
       SpillInfo spillInfo = new SpillInfo(spillRecord, spillPathDetails.outputFilePath);

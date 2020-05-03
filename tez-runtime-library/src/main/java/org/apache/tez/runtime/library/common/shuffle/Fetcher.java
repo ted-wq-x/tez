@@ -67,7 +67,7 @@ import org.apache.tez.runtime.library.common.sort.impl.TezSpillRecord;
 import org.apache.tez.runtime.library.exceptions.FetcherReadTimeoutException;
 import org.apache.tez.runtime.library.common.shuffle.FetchedInput.Type;
 
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 
 /**
  * Responsible for fetching inputs served by the ShuffleHandler for a single
@@ -235,6 +235,7 @@ public class Fetcher extends CallableWithNdc<FetchResult> {
     }
   }
 
+
   // helper method to populate the remaining map
   void populateRemainingMap(List<InputAttemptIdentifier> origlist) {
     if (srcAttemptsRemaining == null) {
@@ -357,7 +358,7 @@ public class Fetcher extends CallableWithNdc<FetchResult> {
         }
 
         spillRec.putIndex(indexRec, 0);
-        spillRec.writeToFile(tmpIndex, conf);
+        spillRec.writeToFile(tmpIndex, conf, localFs);
         // everything went well so far - rename it
         boolean renamed = localFs.rename(tmpIndex, outputPath
             .suffix(Constants.TEZ_RUNTIME_TASK_OUTPUT_INDEX_SUFFIX_STRING));
@@ -542,8 +543,9 @@ public class Fetcher extends CallableWithNdc<FetchResult> {
         }
       } else {
         InputAttemptIdentifier firstAttempt = attempts.iterator().next();
-        LOG.warn("Fetch Failure from host while connecting: " + host + ", attempt: " + firstAttempt
-            + " Informing ShuffleManager: ", e);
+        LOG.warn(String.format(
+            "Fetch Failure while connecting from %s to: %s:%d, attempt: %s Informing ShuffleManager: ",
+            localHostname, host, port, firstAttempt), e);
         return new HostFetchResult(new FetchResult(host, port, partition, partitionCount, srcAttemptsRemaining.values()),
             new InputAttemptIdentifier[] { firstAttempt }, false);
       }
@@ -735,7 +737,7 @@ public class Fetcher extends CallableWithNdc<FetchResult> {
     Path indexFile = getShuffleInputFileName(srcAttemptId.getPathComponent(),
         Constants.TEZ_RUNTIME_TASK_OUTPUT_INDEX_SUFFIX_STRING);
 
-    TezSpillRecord spillRecord = new TezSpillRecord(indexFile, conf);
+    TezSpillRecord spillRecord = new TezSpillRecord(indexFile, localFs);
     idxRecord = spillRecord.getIndex(partition);
     return idxRecord;
   }
@@ -1008,8 +1010,8 @@ public class Fetcher extends CallableWithNdc<FetchResult> {
           return new InputAttemptIdentifier[] { srcAttemptId };
         }
       }
-      LOG.warn("Failed to shuffle output of " + srcAttemptId + " from " + host,
-          ioe);
+      LOG.warn("Failed to shuffle output of " + srcAttemptId + " from " + host + " (to "
+          + localHostname + ")", ioe);
 
       // Cleanup the fetchedInput
       cleanupFetchedInput(fetchedInput);
@@ -1049,7 +1051,7 @@ public class Fetcher extends CallableWithNdc<FetchResult> {
 
     if (currentTime - retryStartTime < httpConnectionParams.getReadTimeout()) {
       LOG.warn("Shuffle output from " + srcAttemptId +
-          " failed, retry it.");
+          " failed (to "+ localHostname +"), retry it.");
       //retry connecting to the host
       return true;
     } else {

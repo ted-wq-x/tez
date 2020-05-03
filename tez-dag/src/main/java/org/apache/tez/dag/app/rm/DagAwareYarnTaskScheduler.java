@@ -19,7 +19,7 @@
 package org.apache.tez.dag.app.rm;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.commons.lang.mutable.MutableInt;
 import org.apache.commons.math3.random.RandomDataGenerator;
@@ -1543,7 +1543,8 @@ public class DagAwareYarnTaskScheduler extends TaskScheduler
     long getIdleExpirationTimestamp(long now) {
       if (idleExpirationTimestamp == 0) {
         if (idleContainerTimeoutMin > 0) {
-          idleExpirationTimestamp = now + random.nextLong(idleContainerTimeoutMin, idleContainerTimeoutMax);
+          idleExpirationTimestamp = now + (idleContainerTimeoutMin == idleContainerTimeoutMax ? idleContainerTimeoutMin
+            : random.nextLong(idleContainerTimeoutMin, idleContainerTimeoutMax));
         } else {
           idleExpirationTimestamp = Long.MAX_VALUE;
         }

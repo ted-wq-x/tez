@@ -42,6 +42,7 @@ import org.apache.hadoop.io.compress.CompressionCodec;
 import org.apache.hadoop.io.compress.DefaultCodec;
 import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.tez.common.CallableWithNdc;
+import org.apache.tez.common.GuavaShim;
 import org.apache.tez.common.TezRuntimeFrameworkConfigs;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.TaskCounter;
@@ -56,7 +57,7 @@ import org.apache.tez.runtime.library.common.combine.Combiner;
 import org.apache.tez.runtime.library.common.sort.impl.TezRawKeyValueIterator;
 import org.apache.tez.runtime.library.exceptions.InputAlreadyClosedException;
 
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
@@ -270,7 +271,7 @@ public class Shuffle implements ExceptionReporter {
   public void run() throws IOException {
     merger.configureAndStart();
     runShuffleFuture = executor.submit(runShuffleCallable);
-    Futures.addCallback(runShuffleFuture, new ShuffleRunnerFutureCallback());
+    Futures.addCallback(runShuffleFuture, new ShuffleRunnerFutureCallback(), GuavaShim.directExecutor());
     executor.shutdown();
   }
 

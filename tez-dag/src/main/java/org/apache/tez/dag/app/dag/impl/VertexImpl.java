@@ -64,6 +64,8 @@ import org.apache.hadoop.yarn.state.StateMachineFactory;
 import org.apache.hadoop.yarn.util.Clock;
 import org.apache.tez.client.TezClientUtils;
 import org.apache.tez.common.ATSConstants;
+import org.apache.tez.common.GuavaShim;
+import org.apache.tez.common.ProgressHelper;
 import org.apache.tez.common.ReflectionUtils;
 import org.apache.tez.common.TezUtilsInternal;
 import org.apache.tez.common.counters.AggregateTezCounters;
@@ -192,7 +194,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.HashMultiset;
 import com.google.common.collect.Lists;
@@ -229,6 +231,7 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
   private final AppContext appContext;
   private final DAG dag;
   private final VertexRecoveryData recoveryData;
+  private boolean isVertexInitSkipped = false;
   private List<TezEvent> initGeneratedEvents = new ArrayList<TezEvent>();
   // set it to be true when setParallelism is called(used for recovery) 
   private boolean setParallelismCalledFlag = false;
@@ -1572,20 +1575,31 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
   List<EventInfo> getOnDemandRouteEvents() {
     return onDemandRouteEvents;
   }
-  
+
+  /**
+   * Updates the progress value in the vertex.
+   * This should be called only when the vertex is running state.
+   * No need to acquire the lock since this is nested inside
+   * {@link #getProgress() getProgress} method.
+   */
   private void computeProgress() {
-    this.readLock.lock();
-    try {
-      float progress = 0f;
-      for (Task task : this.tasks.values()) {
-        progress += (task.getProgress());
+
+    float accProg = 0.0f;
+    int tasksCount = this.tasks.size();
+    for (Task task : this.tasks.values()) {
+      float taskProg = task.getProgress();
+      if (LOG.isDebugEnabled()) {
+        if (!ProgressHelper.isProgressWithinRange(taskProg)) {
+          LOG.debug("progress update: vertex={}, task={} incorrect; range={}",
+              getName(), task.getTaskId().toString(), taskProg);
+        }
       }
-      if (this.numTasks != 0) {
-        progress /= this.numTasks;
-      }
-      this.progress = progress;
-    } finally {
-      this.readLock.unlock();
+      accProg += ProgressHelper.processProgress(taskProg);
+    }
+    // tasksCount is 0, do not reset the current progress.
+    if (tasksCount > 0) {
+      // force the progress to be below within the range
+      progress = ProgressHelper.processProgress(accProg / tasksCount);
     }
   }
 
@@ -2247,7 +2261,7 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
         };
         ListenableFuture<Void> commitFuture = 
             vertex.getAppContext().getExecService().submit(commitCallableEvent);
-        Futures.addCallback(commitFuture, commitCallableEvent.getCallback());
+        Futures.addCallback(commitFuture, commitCallableEvent.getCallback(), GuavaShim.directExecutor());
         vertex.commitFutures.put(outputName, commitFuture);
       }
     }
@@ -2791,6 +2805,15 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
     return VertexState.INITED;
   }
 
+  private boolean isVertexInitSkippedInParentVertices() {
+    for (Map.Entry<Vertex, Edge> entry : sourceVertices.entrySet()) {
+      if(!(((VertexImpl) entry.getKey()).isVertexInitSkipped())) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   private void assignVertexManager() throws TezException {
     // condition for skip initializing stage
     //   - VertexInputInitializerEvent is seen
@@ -2803,8 +2826,10 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
     //        -  Why using VertexReconfigureDoneEvent
     //           -  VertexReconfigureDoneEvent represent the case that user use API reconfigureVertex
     //              VertexReconfigureDoneEvent will be logged
-    if (recoveryData != null
-        && recoveryData.shouldSkipInit()) {
+    //   - TaskStartEvent is seen in that vertex
+    //   - All the parent vertices have skipped initializing stage while recovering
+    if (recoveryData != null && recoveryData.shouldSkipInit()
+        && recoveryData.isVertexTasksStarted() && isVertexInitSkippedInParentVertices()) {
       // Replace the original VertexManager with NoOpVertexManager if the reconfiguration is done in the last AM attempt
       VertexConfigurationDoneEvent reconfigureDoneEvent = recoveryData.getVertexConfigurationDoneEvent();
       if (LOG.isInfoEnabled()) {
@@ -2824,6 +2849,7 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
           VertexManagerPluginDescriptor.create(NoOpVertexManager.class.getName())
             .setUserPayload(UserPayload.create(ByteBuffer.wrap(out.toByteArray()))),
           dagUgi, this, appContext, stateChangeNotifier);
+      isVertexInitSkipped = true;
       return;
     }
 
@@ -4652,6 +4678,11 @@ public class VertexImpl implements org.apache.tez.dag.app.dag.Vertex, EventHandl
   VertexManager getVertexManager() {
     return this.vertexManager;
   }
+
+  public boolean isVertexInitSkipped() {
+    return isVertexInitSkipped;
+  }
+
 
   private static void logLocationHints(String vertexName,
       VertexLocationHint locationHint) {

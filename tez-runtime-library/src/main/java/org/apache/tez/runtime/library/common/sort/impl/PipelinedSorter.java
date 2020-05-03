@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.zip.Deflater;
 
 import com.google.common.annotations.VisibleForTesting;
-import com.google.common.base.Preconditions;
+import org.apache.tez.common.Preconditions;
 import com.google.common.collect.Lists;
 
 import org.apache.hadoop.classification.InterfaceAudience;
@@ -535,7 +535,7 @@ public class PipelinedSorter extends ExternalSorter {
       }
 
       spillFileIndexPaths.put(numSpills, indexFilename);
-      spillRec.writeToFile(indexFilename, conf);
+      spillRec.writeToFile(indexFilename, conf, localFs);
       //TODO: honor cache limits
       indexCacheList.add(spillRec);
       ++numSpills;
@@ -625,7 +625,7 @@ public class PipelinedSorter extends ExternalSorter {
         mapOutputFile.getSpillIndexFileForWrite(numSpills, partitions
             * MAP_OUTPUT_INDEX_RECORD_LENGTH);
       spillFileIndexPaths.put(numSpills, indexFilename);
-      spillRec.writeToFile(indexFilename, conf);
+      spillRec.writeToFile(indexFilename, conf, localFs);
       //TODO: honor cache limits
       indexCacheList.add(spillRec);
       ++numSpills;
@@ -737,7 +737,7 @@ public class PipelinedSorter extends ExternalSorter {
               + "finalIndexFile=" + finalIndexFile + ", filename=" + filename + ", indexFilename=" +
               indexFilename);
         }
-        TezSpillRecord spillRecord = new TezSpillRecord(finalIndexFile, conf);
+        TezSpillRecord spillRecord = new TezSpillRecord(finalIndexFile, localFs);
         if (reportPartitionStats()) {
           for (int i = 0; i < spillRecord.size(); i++) {
             partitionStats[i] += spillRecord.getIndex(i).getPartLength();
@@ -833,7 +833,7 @@ public class PipelinedSorter extends ExternalSorter {
       numShuffleChunks.setValue(1); //final merge has happened.
       fileOutputByteCounter.increment(rfs.getFileStatus(finalOutputFile).getLen());
 
-      spillRec.writeToFile(finalIndexFile, conf);
+      spillRec.writeToFile(finalIndexFile, conf, localFs);
       finalOut.close();
       for (int i = 0; i < numSpills; i++) {
         Path indexFilename = spillFileIndexPaths.get(i);

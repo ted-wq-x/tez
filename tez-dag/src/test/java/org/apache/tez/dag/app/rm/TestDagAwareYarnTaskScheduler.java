@@ -35,6 +35,7 @@ import org.apache.hadoop.yarn.api.records.Priority;
 import org.apache.hadoop.yarn.api.records.Resource;
 import org.apache.hadoop.yarn.client.api.async.AMRMClientAsync;
 import org.apache.hadoop.yarn.client.api.impl.AMRMClientImpl;
+import org.apache.hadoop.yarn.exceptions.YarnException;
 import org.apache.hadoop.yarn.proto.YarnServiceProtos.SchedulerResourceTypes;
 import org.apache.hadoop.yarn.util.resource.Resources;
 import org.apache.tez.common.MockDNSToSwitchMapping;
@@ -1530,6 +1531,26 @@ public class TestDagAwareYarnTaskScheduler {
     verify(mockRMClient).removeContainerRequest(reqv0t0);
   }
 
+  @Test
+  public void testMinMaxContainerIdleMillisAreEqual() throws Exception {
+    AMRMClientAsyncWrapperForTest mockRMClient = new AMRMClientAsyncWrapperForTest();
+    Configuration conf = new Configuration();
+    conf.setLong(TezConfiguration.TEZ_AM_CONTAINER_IDLE_RELEASE_TIMEOUT_MIN_MILLIS, 10000);
+    conf.setLong(TezConfiguration.TEZ_AM_CONTAINER_IDLE_RELEASE_TIMEOUT_MAX_MILLIS, 10000);
+
+    TaskSchedulerContext mockApp = setupMockTaskSchedulerContext("host", 0, "url", conf);
+    TaskSchedulerContextDrainable drainableAppCallback = createDrainableContext(mockApp);
+    MockClock clock = new MockClock(1000);
+    NewTaskSchedulerForTest scheduler = new NewTaskSchedulerForTest(drainableAppCallback, mockRMClient, clock);
+    scheduler.initialize();
+
+    NodeId host1 = NodeId.newInstance("host1", 1);
+    Container container1 = Container.newInstance(null, host1, null, null, null, null);
+    HeldContainer heldContainer = scheduler.new HeldContainer(container1);
+    long now = clock.getTime();
+    assertEquals(now + 10000, heldContainer.getIdleExpirationTimestamp(now));
+  }
+
   static class AMRMClientAsyncWrapperForTest extends AMRMClientAsyncWrapper {
     AMRMClientAsyncWrapperForTest() {
       super(new MockAMRMClient(), 10000, null);
@@ -1537,6 +1558,12 @@ public class TestDagAwareYarnTaskScheduler {
 
     RegisterApplicationMasterResponse getRegistrationResponse() {
       return ((MockAMRMClient) client).getRegistrationResponse();
+    }
+
+    @Override
+    public RegisterApplicationMasterResponse registerApplicationMaster(String appHostName, int appHostPort,
+        String appTrackingUrl) throws YarnException, IOException {
+      return client.registerApplicationMaster(appHostName, appHostPort, appTrackingUrl);
     }
 
     @Override
@@ -1565,10 +1592,9 @@ public class TestDagAwareYarnTaskScheduler {
     protected void serviceStop() {
     }
 
-    @SuppressWarnings("unchecked")
     @Override
-    public RegisterApplicationMasterResponse registerApplicationMaster(
-        String appHostName, int appHostPort, String appTrackingUrl) {
+    public RegisterApplicationMasterResponse registerApplicationMaster(String appHostName, int appHostPort,
+        String appTrackingUrl) {
       mockRegResponse = mock(RegisterApplicationMasterResponse.class);
       Resource mockMaxResource = Resources.createResource(1024*1024, 1024);
       Map<ApplicationAccessType, String> mockAcls = Collections.emptyMap();

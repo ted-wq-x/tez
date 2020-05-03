@@ -19,7 +19,6 @@
 package org.apache.tez.client;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
@@ -39,6 +38,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.Vector;
 import java.util.Map.Entry;
+import java.util.Objects;
 
 import com.google.common.base.Strings;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -112,7 +112,6 @@ import org.apache.tez.dag.api.records.DAGProtos.PlanKeyValuePair;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Function;
-import com.google.common.base.Preconditions;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 
@@ -121,6 +120,31 @@ public class TezClientUtils {
 
   private static Logger LOG = LoggerFactory.getLogger(TezClientUtils.class);
   private static final int UTF8_CHUNK_SIZE = 16 * 1024;
+
+  private static FileStatus[] getLRFileStatus(String fileName, Configuration conf) throws
+      IOException {
+    URI uri;
+    try {
+      uri = new URI(fileName);
+    } catch (URISyntaxException e) {
+      String message = "Invalid URI defined in configuration for"
+          + " location of TEZ jars. providedURI=" + fileName;
+      LOG.error(message);
+      throw new TezUncheckedException(message, e);
+    }
+
+    Path p = new Path(uri);
+    FileSystem fs = p.getFileSystem(conf);
+    p = fs.resolvePath(p.makeQualified(fs.getUri(),
+        fs.getWorkingDirectory()));
+    FileSystem targetFS = p.getFileSystem(conf); 
+    if (targetFS.isDirectory(p)) {
+      return targetFS.listStatus(p);
+    } else {
+      FileStatus fStatus = targetFS.getFileStatus(p);
+      return new FileStatus[]{fStatus};
+    }
+  }
 
   /**
    * Setup LocalResource map for Tez jars based on provided Configuration
@@ -137,7 +161,7 @@ public class TezClientUtils {
   static boolean setupTezJarsLocalResources(TezConfiguration conf,
       Credentials credentials, Map<String, LocalResource> tezJarResources)
       throws IOException {
-    Preconditions.checkNotNull(credentials, "A non-null credentials object should be specified");
+    Objects.requireNonNull(credentials, "A non-null credentials object should be specified");
     boolean usingTezArchive = false;
 
     if (conf.getBoolean(TezConfiguration.TEZ_IGNORE_LIB_URIS, false)){
@@ -193,16 +217,8 @@ public class TezClientUtils {
       }
       Path p = new Path(u);
       FileSystem remoteFS = p.getFileSystem(conf);
-      FileStatus targetStatus = remoteFS.getFileLinkStatus(p);
-      p = targetStatus.getPath();
-
-      FileStatus[] fileStatuses;
-      FileSystem targetFS = p.getFileSystem(conf);
-      if (targetStatus.isDirectory()) {
-        fileStatuses = targetFS.listStatus(p);
-      } else {
-        fileStatuses = new FileStatus[]{targetStatus};
-      }
+      p = remoteFS.resolvePath(p.makeQualified(remoteFS.getUri(),
+          remoteFS.getWorkingDirectory()));
 
       LocalResourceType type = null;
 
@@ -215,6 +231,8 @@ public class TezClientUtils {
         } else {
           type = LocalResourceType.FILE;
         }
+
+      FileStatus [] fileStatuses = getLRFileStatus(configUri, conf);
 
       for (FileStatus fStatus : fileStatuses) {
         String linkName;
@@ -311,16 +329,13 @@ public class TezClientUtils {
       Path stagingArea)
       throws IOException {
     FileSystem fs = stagingArea.getFileSystem(conf);
+    String realUser;
+    String currentUser;
     UserGroupInformation ugi = UserGroupInformation.getLoginUser();
-    String realUser = ugi.getShortUserName();
-    String currentUser = UserGroupInformation.getCurrentUser().getShortUserName();
-    FileStatus fsStatus = null;
-    try {
-      fsStatus = fs.getFileStatus(stagingArea);
-    } catch (FileNotFoundException e) {
-      TezCommonUtils.mkDirForAM(fs, stagingArea);
-    }
-    if (fsStatus != null) {
+    realUser = ugi.getShortUserName();
+    currentUser = UserGroupInformation.getCurrentUser().getShortUserName();
+    if (fs.exists(stagingArea)) {
+      FileStatus fsStatus = fs.getFileStatus(stagingArea);
       String owner = fsStatus.getOwner();
       if (!(owner.equals(currentUser) || owner.equals(realUser))) {
         throw new IOException("The ownership on the staging directory "
@@ -335,6 +350,8 @@ public class TezClientUtils {
             + TezCommonUtils.TEZ_AM_DIR_PERMISSION);
         fs.setPermission(stagingArea, TezCommonUtils.TEZ_AM_DIR_PERMISSION);
       }
+    } else {
+      TezCommonUtils.mkDirForAM(fs, stagingArea);
     }
     return fs;
   }
@@ -379,9 +396,8 @@ public class TezClientUtils {
   static Credentials setupDAGCredentials(DAG dag, Credentials sessionCredentials,
       Configuration conf) throws IOException {
 
-    Preconditions.checkNotNull(sessionCredentials);
+    Objects.requireNonNull(sessionCredentials);
     TezCommonUtils.logCredentials(LOG, sessionCredentials, "session");
-
     Credentials dagCredentials = new Credentials();
     // All session creds are required for the DAG.
     dagCredentials.mergeAll(sessionCredentials);
@@ -445,7 +461,7 @@ public class TezClientUtils {
       ServicePluginsDescriptor servicePluginsDescriptor, JavaOptsChecker javaOptsChecker)
       throws IOException, YarnException {
 
-    Preconditions.checkNotNull(sessionCreds);
+    Objects.requireNonNull(sessionCreds);
     TezConfiguration conf = amConfig.getTezConfiguration();
 
     FileSystem fs = TezClientUtils.ensureStagingDirExists(conf,
@@ -470,19 +486,8 @@ public class TezClientUtils {
     // Setup required Credentials for the AM launch. DAG specific credentials
     // are handled separately.
     ByteBuffer securityTokens = null;
-    // Setup security tokens
-    Credentials amLaunchCredentials = new Credentials();
-    if (amConfig.getCredentials() != null) {
-      amLaunchCredentials.addAll(amConfig.getCredentials());
-    }
-
-    // Add Staging dir creds to the list of session credentials.
-    TokenCache.obtainTokensForFileSystems(sessionCreds, new Path[]{binaryConfPath}, conf);
-
-    populateTokenCache(conf, sessionCreds);
-
-    // Add session specific credentials to the AM credentials.
-    amLaunchCredentials.mergeAll(sessionCreds);
+    Credentials amLaunchCredentials =
+        prepareAmLaunchCredentials(amConfig, sessionCreds, conf, binaryConfPath);
 
     DataOutputBuffer dob = new DataOutputBuffer();
     amLaunchCredentials.writeTokenStorageToStream(dob);
@@ -703,6 +708,35 @@ public class TezClientUtils {
 
   }
 
+  static Credentials prepareAmLaunchCredentials(AMConfiguration amConfig, Credentials sessionCreds,
+      TezConfiguration conf, Path binaryConfPath) throws IOException {
+    // Setup security tokens
+    Credentials amLaunchCredentials = new Credentials();
+
+    // Add SimpleHistoryLoggingService logDir creds to the list of session credentials
+    // If it is on HDFS
+    String simpleHistoryLogDir = conf.get(TezConfiguration.TEZ_SIMPLE_HISTORY_LOGGING_DIR);
+    if (simpleHistoryLogDir != null && !simpleHistoryLogDir.isEmpty()) {
+      Path simpleHistoryLogDirPath = new Path(simpleHistoryLogDir);
+      TokenCache.obtainTokensForFileSystems(sessionCreds, new Path[] { simpleHistoryLogDirPath },
+          conf);
+    }
+
+    // Add Staging dir creds to the list of session credentials.
+    TokenCache.obtainTokensForFileSystems(sessionCreds, new Path[] {binaryConfPath }, conf);
+
+    populateTokenCache(conf, sessionCreds);
+
+    // Add session specific credentials to the AM credentials.
+    amLaunchCredentials.mergeAll(sessionCreds);
+
+    if (amConfig.getCredentials() != null) {
+      amLaunchCredentials.mergeAll(amConfig.getCredentials());
+    }
+    TezCommonUtils.logCredentials(LOG, amLaunchCredentials, "amLaunch");
+    return amLaunchCredentials;
+  }
+
   //get secret keys and tokens and store them into TokenCache
   private static void populateTokenCache(TezConfiguration conf, Credentials credentials)
           throws IOException{
@@ -725,12 +759,13 @@ public class TezClientUtils {
       JavaOptsChecker javaOptsChecker) throws IOException {
     Credentials dagCredentials = setupDAGCredentials(dag, credentials,
         amConfig.getTezConfiguration());
+    TezCommonUtils.logCredentials(LOG, dagCredentials, "dagPlan");
     return dag.createDag(amConfig.getTezConfiguration(), dagCredentials, tezJarResources,
         amConfig.getBinaryConfLR(), tezLrsAsArchive, servicePluginsDescriptor, javaOptsChecker);
   }
   
   static void maybeAddDefaultLoggingJavaOpts(String logLevel, List<String> vargs) {
-    Preconditions.checkNotNull(vargs);
+    Objects.requireNonNull(vargs);
     if (!vargs.isEmpty()) {
       for (String arg : vargs) {
         if (arg.contains(TezConstants.TEZ_ROOT_LOGGER_NAME)) {
@@ -884,7 +919,7 @@ public class TezClientUtils {
 
   static DAGClientAMProtocolBlockingPB getAMProxy(FrameworkClient yarnClient,
       Configuration conf,
-      ApplicationId applicationId) throws TezException, IOException {
+      ApplicationId applicationId, UserGroupInformation ugi) throws TezException, IOException {
     ApplicationReport appReport;
     try {
       appReport = yarnClient.getApplicationReport(
@@ -919,16 +954,15 @@ public class TezClientUtils {
       throw new TezException(e);
     }
     return getAMProxy(conf, appReport.getHost(),
-        appReport.getRpcPort(), appReport.getClientToAMToken());
+        appReport.getRpcPort(), appReport.getClientToAMToken(), ugi);
   }
 
   @Private
   public static DAGClientAMProtocolBlockingPB getAMProxy(final Configuration conf, String amHost,
-      int amRpcPort, org.apache.hadoop.yarn.api.records.Token clientToAMToken) throws IOException {
+      int amRpcPort, org.apache.hadoop.yarn.api.records.Token clientToAMToken,
+      UserGroupInformation userUgi) throws IOException {
 
     final InetSocketAddress serviceAddr = NetUtils.createSocketAddrForHost(amHost, amRpcPort);
-    UserGroupInformation userUgi = UserGroupInformation.createRemoteUser(UserGroupInformation
-        .getCurrentUser().getUserName());
     if (clientToAMToken != null) {
       Token<ClientToAMTokenIdentifier> token = ConverterUtils.convertFromYarn(clientToAMToken,
           serviceAddr);
