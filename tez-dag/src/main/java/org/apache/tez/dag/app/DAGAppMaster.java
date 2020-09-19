@@ -47,9 +47,10 @@ import java.util.Random;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
-import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -104,7 +105,6 @@ import org.apache.hadoop.yarn.api.records.ApplicationAttemptId;
 import org.apache.hadoop.yarn.api.records.ApplicationId;
 import org.apache.hadoop.yarn.api.records.ContainerId;
 import org.apache.hadoop.yarn.api.records.LocalResource;
-import org.apache.hadoop.yarn.conf.YarnConfiguration;
 import org.apache.hadoop.yarn.event.Dispatcher;
 import org.apache.hadoop.yarn.event.Event;
 import org.apache.hadoop.yarn.event.EventHandler;
@@ -302,7 +302,7 @@ public class DAGAppMaster extends AbstractService {
   private Path tezSystemStagingDir;
   private FileSystem recoveryFS;
 
-  private ExecutorService rawExecutor;
+  private ThreadPoolExecutor rawExecutor;
   private ListeningExecutorService execService;
 
   // TODO May not need to be a bidi map
@@ -621,8 +621,13 @@ public class DAGAppMaster extends AbstractService {
       }
     }
 
-    rawExecutor = Executors.newCachedThreadPool(new ThreadFactoryBuilder().setDaemon(true)
-        .setNameFormat("App Shared Pool - " + "#%d").build());
+    int threadCount = conf.getInt(TezConfiguration.TEZ_AM_DAG_APPCONTEXT_THREAD_COUNT_LIMIT,
+            TezConfiguration.TEZ_AM_DAG_APPCONTEXT_THREAD_COUNT_LIMIT_DEFAULT);
+    // NOTE: LinkedBlockingQueue does not have a capacity Limit and can thus
+    // occupy large memory chunks when numerous Runables are pending for execution
+    rawExecutor = new ThreadPoolExecutor(threadCount, threadCount,
+            60L, TimeUnit.SECONDS, new LinkedBlockingQueue(),
+            new ThreadFactoryBuilder().setDaemon(true).setNameFormat("App Shared Pool - " + "#%d").build());
     execService = MoreExecutors.listeningDecorator(rawExecutor);
 
     initServices(conf);
@@ -1504,6 +1509,14 @@ public class DAGAppMaster extends AbstractService {
     }
 
     @Override
+    // For Testing only!
+    public ThreadPoolExecutor getThreadPool() {
+      synchronized (DAGAppMaster.this) {
+        return rawExecutor;
+      }
+    }
+
+    @Override
     public ListeningExecutorService getExecService() {
       return execService;
     }
@@ -2328,6 +2341,8 @@ public class DAGAppMaster extends AbstractService {
 
   public static void main(String[] args) {
     try {
+      // Install the tez class loader, which can be used add new resources
+      TezClassLoader.setupTezClassLoader();
       Thread.setDefaultUncaughtExceptionHandler(new YarnUncaughtExceptionHandler());
       final String pid = System.getenv().get("JVM_PID");
       String containerIdStr =
@@ -2374,8 +2389,7 @@ public class DAGAppMaster extends AbstractService {
           + ", localDirs=" + System.getenv(Environment.LOCAL_DIRS.name())
           + ", logDirs=" + System.getenv(Environment.LOG_DIRS.name()));
 
-      // TODO Does this really need to be a YarnConfiguration ?
-      Configuration conf = new Configuration(new YarnConfiguration());
+      Configuration conf = new Configuration();
 
       ConfigurationProto confProto =
           TezUtilsInternal.readUserSpecifiedTezConfiguration(System.getenv(Environment.PWD.name()));
